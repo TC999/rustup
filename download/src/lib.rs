@@ -327,8 +327,8 @@ pub mod reqwest_be {
     use std::sync::LazyLock;
     use std::time::Duration;
 
-    use anyhow::{anyhow, Context, Result};
-    use reqwest::{header, Client, ClientBuilder, Proxy, Response};
+    use anyhow::{Context, Result, anyhow};
+    use reqwest::{Client, ClientBuilder, Proxy, Response, header};
     #[cfg(feature = "reqwest-rustls-tls")]
     use rustls::crypto::aws_lc_rs;
     #[cfg(feature = "reqwest-rustls-tls")]
@@ -379,7 +379,7 @@ pub mod reqwest_be {
             .pool_max_idle_per_host(0)
             .gzip(false)
             .proxy(Proxy::custom(env_proxy))
-            .timeout(Duration::from_secs(30))
+            .read_timeout(Duration::from_secs(30))
     }
 
     #[cfg(feature = "reqwest-rustls-tls")]

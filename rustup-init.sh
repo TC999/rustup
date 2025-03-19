@@ -33,7 +33,7 @@ RUSTUP_QUIET=no
 # NOTICE: If you change anything here, please make the same changes in setup_mode.rs
 usage() {
     cat <<EOF
-rustup-init 1.28.0 (b6fdf2fa8 2024-11-25)
+rustup-init 1.28.1 (bb9441b61 2025-03-05)
 
 The installer for rustup
 
@@ -857,4 +857,13 @@ get_strong_ciphersuites_for() {
     fi
 }
 
-main "$@" || exit 1
+set +u
+case "$RUSTUP_INIT_SH_PRINT" in
+    arch | architecture)
+        get_architecture || exit 1
+        echo "$RETVAL"
+        ;;
+    *)
+        main "$@" || exit 1
+        ;;
+esac

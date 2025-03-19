@@ -8,9 +8,9 @@ use std::ops::{BitAnd, BitAndAssign};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
-use anyhow::{anyhow, bail, Context, Result};
-use retry::delay::{jitter, Fibonacci};
-use retry::{retry, OperationResult};
+use anyhow::{Context, Result, anyhow, bail};
+use retry::delay::{Fibonacci, jitter};
+use retry::{OperationResult, retry};
 use sha2::Sha256;
 #[cfg(any(feature = "reqwest-rustls-tls", feature = "reqwest-native-tls"))]
 use tracing::info;
@@ -279,7 +279,9 @@ async fn download_file_(
         #[cfg(feature = "reqwest-native-tls")]
         (_, Some(false)) => {
             if use_curl_backend == Some(true) {
-                info!("RUSTUP_USE_CURL is set and RUSTUP_USE_RUSTLS is set to off, using reqwest with native-tls");
+                info!(
+                    "RUSTUP_USE_CURL is set and RUSTUP_USE_RUSTLS is set to off, using reqwest with native-tls"
+                );
             }
             Backend::Reqwest(TlsBackend::NativeTls)
         }
@@ -363,8 +365,14 @@ where
 /// If `dest` already exists then it will be replaced.
 pub(crate) fn symlink_or_hardlink_file(src: &Path, dest: &Path) -> Result<()> {
     let _ = fs::remove_file(dest);
+    // Use a relative symlink path if the src and dest are in the same directory.
+    let symlink_target = if src.parent() == dest.parent() {
+        src.file_name().map(Path::new).unwrap_or(src)
+    } else {
+        src
+    };
     // The error is only used by macos
-    let Err(_err) = symlink_file(src, dest) else {
+    let Err(_err) = symlink_file(symlink_target, dest) else {
         return Ok(());
     };
 

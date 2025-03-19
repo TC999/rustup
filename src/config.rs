@@ -4,17 +4,18 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::{env, io};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use thiserror::Error as ThisError;
 use tokio_stream::StreamExt;
 use tracing::trace;
 
+use crate::dist::AutoInstallMode;
 use crate::{
     cli::{common, self_update::SelfUpdateMode},
     dist::{
-        self, download::DownloadCfg, temp, PartialToolchainDesc, Profile, TargetTriple,
-        ToolchainDesc,
+        self, PartialToolchainDesc, Profile, TargetTriple, ToolchainDesc, download::DownloadCfg,
+        temp,
     },
     errors::RustupError,
     fallback_settings::FallbackSettings,
@@ -31,7 +32,9 @@ use crate::{
 
 #[derive(Debug, ThisError)]
 enum OverrideFileConfigError {
-    #[error("empty toolchain override file detected. Please remove it, or else specify the desired toolchain properties in the file")]
+    #[error(
+        "empty toolchain override file detected. Please remove it, or else specify the desired toolchain properties in the file"
+    )]
     Empty,
     #[error("missing toolchain properties in toolchain override file")]
     Invalid,
@@ -179,18 +182,7 @@ impl OverrideCfg {
                         .transpose()?,
                 }
             }
-            ToolchainName::Custom(name) => {
-                if file.toolchain.targets.is_some()
-                    || file.toolchain.components.is_some()
-                    || file.toolchain.profile.is_some()
-                {
-                    bail!(
-                        "toolchain options are ignored for a custom toolchain ({})",
-                        name
-                    )
-                }
-                Self::Custom(name)
-            }
+            ToolchainName::Custom(name) => Self::Custom(name),
         })
     }
 
@@ -384,6 +376,24 @@ impl<'a> Cfg<'a> {
         self.toolchain_override = Some(toolchain_override.to_owned());
     }
 
+    pub(crate) fn set_auto_install(&mut self, mode: AutoInstallMode) -> Result<()> {
+        self.settings_file.with_mut(|s| {
+            s.auto_install = Some(mode);
+            Ok(())
+        })?;
+        (self.notify_handler)(Notification::SetAutoInstall(mode.as_str()));
+        Ok(())
+    }
+
+    pub(crate) fn should_auto_install(&self) -> Result<bool> {
+        if let Ok(mode) = self.process.var("RUSTUP_AUTO_INSTALL") {
+            Ok(mode != "0")
+        } else {
+            self.settings_file
+                .with(|s| Ok(s.auto_install != Some(AutoInstallMode::Disable)))
+        }
+    }
+
     // Returns a profile, if one exists in the settings file.
     //
     // Returns `Err` if the settings file could not be read or the profile is
@@ -498,7 +508,7 @@ impl<'a> Cfg<'a> {
             .transpose()?)
     }
 
-    pub(crate) fn toolchain_from_partial(
+    pub(crate) async fn toolchain_from_partial(
         &self,
         toolchain: Option<PartialToolchainDesc>,
     ) -> anyhow::Result<Toolchain<'_>> {
@@ -509,20 +519,68 @@ impl<'a> Cfg<'a> {
                 )))
             })
             .transpose()?;
-        self.local_toolchain(toolchain)
+        self.local_toolchain(toolchain).await
     }
 
-    pub(crate) fn find_active_toolchain(
+    pub(crate) async fn find_active_toolchain(
         &self,
+        force_install_active: Option<bool>,
     ) -> Result<Option<(LocalToolchainName, ActiveReason)>> {
-        Ok(
-            if let Some((override_config, reason)) = self.find_override_config()? {
-                Some((override_config.into_local_toolchain_name(), reason))
-            } else {
-                self.get_default()?
-                    .map(|x| (x.into(), ActiveReason::Default))
-            },
-        )
+        let (components, targets, profile, toolchain, reason) = match self.find_override_config()? {
+            Some((
+                OverrideCfg::Official {
+                    components,
+                    targets,
+                    profile,
+                    toolchain,
+                },
+                reason,
+            )) => (components, targets, profile, toolchain, reason),
+            Some((override_config, reason)) => {
+                return Ok(Some((override_config.into_local_toolchain_name(), reason)));
+            }
+            None => {
+                return Ok(self
+                    .get_default()?
+                    .map(|x| (x.into(), ActiveReason::Default)));
+            }
+        };
+
+        let should_install_active = if let Some(force) = force_install_active {
+            force
+        } else {
+            self.should_auto_install()?
+        };
+
+        if !should_install_active {
+            return Ok(Some(((&toolchain).into(), reason)));
+        }
+
+        let components = components.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+        let targets = targets.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+        match DistributableToolchain::new(self, toolchain.clone()) {
+            Err(RustupError::ToolchainNotInstalled { .. }) => {
+                DistributableToolchain::install(
+                    self,
+                    &toolchain,
+                    &components,
+                    &targets,
+                    profile.unwrap_or_default(),
+                    false,
+                )
+                .await?;
+            }
+            Ok(mut distributable) => {
+                if !distributable.components_exist(&components, &targets)? {
+                    distributable
+                        .update(&components, &targets, profile.unwrap_or_default())
+                        .await?;
+                }
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        Ok(Some(((&toolchain).into(), reason)))
     }
 
     fn find_override_config(&self) -> Result<Option<(OverrideCfg, ActiveReason)>> {
@@ -701,48 +759,53 @@ impl<'a> Cfg<'a> {
     }
 
     #[tracing::instrument(level = "trace")]
-    pub(crate) fn active_rustc_version(&mut self) -> Result<Option<String>> {
+    pub(crate) async fn active_rustc_version(&mut self) -> Result<Option<String>> {
         if let Some(t) = self.process.args().find(|x| x.starts_with('+')) {
             trace!("Fetching rustc version from toolchain `{}`", t);
             self.set_toolchain_override(&ResolvableToolchainName::try_from(&t[1..])?);
         }
 
-        let Some((name, _)) = self.find_active_toolchain()? else {
+        let Some((name, _)) = self.find_active_toolchain(None).await? else {
             return Ok(None);
         };
         Ok(Some(Toolchain::new(self, name)?.rustc_version()))
     }
 
-    pub(crate) fn resolve_toolchain(
+    pub(crate) async fn resolve_toolchain(
         &self,
         name: Option<ResolvableToolchainName>,
     ) -> Result<Toolchain<'_>> {
         let toolchain = name
             .map(|name| anyhow::Ok(name.resolve(&self.get_default_host_triple()?)?.into()))
             .transpose()?;
-        self.local_toolchain(toolchain)
+        self.local_toolchain(toolchain).await
     }
 
-    pub(crate) fn resolve_local_toolchain(
+    pub(crate) async fn resolve_local_toolchain(
         &self,
         name: Option<ResolvableLocalToolchainName>,
     ) -> Result<Toolchain<'_>> {
         let local = name
             .map(|name| name.resolve(&self.get_default_host_triple()?))
             .transpose()?;
-        self.local_toolchain(local)
+        self.local_toolchain(local).await
     }
 
-    fn local_toolchain(&self, name: Option<LocalToolchainName>) -> Result<Toolchain<'_>> {
-        let toolchain = match name {
-            Some(tc) => tc,
-            None => {
-                self.find_active_toolchain()?
-                    .ok_or_else(|| no_toolchain_error(self.process))?
-                    .0
+    async fn local_toolchain(&self, name: Option<LocalToolchainName>) -> Result<Toolchain<'_>> {
+        match name {
+            Some(tc) => {
+                let install_if_missing = self.should_auto_install()?;
+                Toolchain::from_local(tc, install_if_missing, self).await
             }
-        };
-        Ok(Toolchain::new(self, toolchain)?)
+            None => {
+                let tc = self
+                    .find_active_toolchain(None)
+                    .await?
+                    .ok_or_else(|| no_toolchain_error(self.process))?
+                    .0;
+                Ok(Toolchain::new(self, tc)?)
+            }
+        }
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
