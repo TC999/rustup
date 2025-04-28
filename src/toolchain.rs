@@ -53,6 +53,7 @@ impl<'a> Toolchain<'a> {
             Ok(tc) => Ok(tc),
             Err(RustupError::ToolchainNotInstalled {
                 name: ToolchainName::Official(desc),
+                ..
             }) if install_if_missing => {
                 Ok(
                     DistributableToolchain::install(cfg, &desc, &[], &[], cfg.get_profile()?, true)
@@ -107,7 +108,10 @@ impl<'a> Toolchain<'a> {
         let path = cfg.toolchain_path(&name);
         if !Toolchain::exists(cfg, &name)? {
             return Err(match name {
-                LocalToolchainName::Named(name) => RustupError::ToolchainNotInstalled { name },
+                LocalToolchainName::Named(name) => {
+                    let is_active = matches!(cfg.active_toolchain(), Ok(Some((t, _))) if t == name);
+                    RustupError::ToolchainNotInstalled { name, is_active }
+                }
                 LocalToolchainName::Path(name) => RustupError::PathToolchainNotInstalled(name),
             });
         }
@@ -370,7 +374,7 @@ impl<'a> Toolchain<'a> {
         Ok(None)
     }
 
-    #[cfg_attr(feature="otel", tracing::instrument(err,fields(binary, recursion=self.cfg.process.var("RUST_RECURSION_COUNT").ok())))]
+    #[cfg_attr(feature="otel", tracing::instrument(err, fields(binary, recursion = self.cfg.process.var("RUST_RECURSION_COUNT").ok())))]
     fn create_command<T: AsRef<OsStr> + Debug>(&self, binary: T) -> Result<Command, anyhow::Error> {
         // Create the path to this binary within the current toolchain sysroot
         let binary = if let Some(binary_str) = binary.as_ref().to_str() {
@@ -419,6 +423,19 @@ impl<'a> Toolchain<'a> {
         };
         let mut cmd = Command::new(path);
         self.set_env(&mut cmd);
+
+        // If we're running cargo and the `CARGO` environment variable is set
+        // to a rustup proxy then change `CARGO` to be the real cargo binary,
+        // but only if we know the absolute path to cargo.
+        // This works around an issue with old versions of cargo not updating
+        // the environment variable itself.
+        if Path::new(&binary).file_stem() == Some("cargo".as_ref()) && path.is_absolute() {
+            if let Some(cargo) = self.cfg.process.var_os("CARGO") {
+                if fs::read_link(&cargo).is_ok_and(|p| p.file_stem() == Some("rustup".as_ref())) {
+                    cmd.env("CARGO", path);
+                }
+            }
+        }
         Ok(cmd)
     }
 
