@@ -1,6 +1,7 @@
 //! A mock distribution server used by tests/cli-v1.rs and
 //! tests/cli-v2.rs
 use std::{
+    borrow::Cow,
     cell::RefCell,
     collections::HashMap,
     env::{self, consts::EXE_SUFFIX},
@@ -32,6 +33,7 @@ use crate::test::this_host_triple;
 use crate::utils;
 
 use super::{
+    CROSS_ARCH1, CROSS_ARCH2, MULTI_ARCH1,
     dist::{MockDistServer, MockManifestVersion, Release, RlsStatus, change_channel_date},
     mock::MockFile,
 };
@@ -63,6 +65,53 @@ pub struct Config {
     pub test_root_dir: PathBuf,
 }
 
+/// Helper type to simplify assertions of a command's output.
+///
+/// Typically, an [`Assert`] instance is created by calling the
+/// [`Config::expect()`] method (or its variations) which will run the given
+/// command in the test environment and wrap its output in the instance.
+/// Then, that output can be compared against the expected one.
+///
+/// # Snapshot-Based Testing
+///
+/// Currently, rustup utilizes [`snapbox`] (a snapshot-based testing library)
+/// for most comparisons, where the corresponding [`Assert`] method would
+/// accept an `expected` argument conforming [`IntoData`], which is also
+/// called a "snapshot".
+///
+/// Most of our tests use [inline][`snapbox::data::Inline`] snapshots created
+/// with [`snapbox::str`], but it is also possible to use snapshots from
+/// another file with [`snapbox::file`].
+///
+/// # Creating or Updating a Snapshot
+///
+/// There is no need to write out a snapshot by hand. Instead, create an empty
+/// snapshot (e.g. `snapbox::str![[""]]`), and run the test in question with the
+/// environment variable `SNAPSHOTS=overwrite` set. Normally, the snapshot will
+/// then be populated automatically with the right value (modulo redaction,
+/// which will be discussed in a later section).
+///
+/// The same environment variable is also used to update a snapshot with no extra
+/// steps required.
+///
+/// # Redacting Snapshots
+///
+/// To defend against leaking of environment-specific information that might
+/// break the tests on a different machine, a set of redaction rules (also known
+/// as "filters") is used to sanitize the output before sending to comparison.
+///
+/// Rustup extends the list of `snapbox`'s default filters (see
+/// [`assert_data_eq`]'s documentation for more info) with a list of
+/// rustup-specific values, including:
+/// - `[CURRENT_VERSION]`: The current rustup version.
+/// - `[HOST_TRIPLE]`: The return value of [`this_host_triple()`].
+/// - `[CROSS_ARCH_I]`: The value of [`CROSS_ARCH1`].
+/// - `[CROSS_ARCH_II]`: The value of [`CROSS_ARCH2`].
+/// - `[MULTI_ARCH_I]`: The value of [`MULTI_ARCH1`].
+///
+/// When updating snapshots, the filters are automatically applied.
+/// To redact some remaining part of the snapshot, you can use the
+/// [`Assert::extend_redactions`] method to introduce new filters.
 #[derive(Clone)]
 pub struct Assert {
     output: SanitizedOutput,
@@ -70,11 +119,20 @@ pub struct Assert {
 }
 
 impl Assert {
-    /// Creates a new [`Assert`] object with the given command [`SanitizedOutput`].
+    /// Creates a new [`Assert`] object with the given [`SanitizedOutput`].
     pub fn new(output: SanitizedOutput) -> Self {
         let mut redactions = Redactions::new();
         redactions
-            .extend([("[HOST_TRIPLE]", this_host_triple())])
+            .extend([
+                (
+                    "[CURRENT_VERSION]",
+                    Cow::Borrowed(env!("CARGO_PKG_VERSION")),
+                ),
+                ("[HOST_TRIPLE]", Cow::Owned(this_host_triple())),
+                ("[CROSS_ARCH_I]", Cow::Borrowed(CROSS_ARCH1)),
+                ("[CROSS_ARCH_II]", Cow::Borrowed(CROSS_ARCH2)),
+                ("[MULTI_ARCH_I]", Cow::Borrowed(MULTI_ARCH1)),
+            ])
             .expect("invalid redactions detected");
         Self { output, redactions }
     }
@@ -87,6 +145,15 @@ impl Assert {
         self.redactions
             .extend(vars)
             .expect("invalid redactions detected");
+        self
+    }
+
+    pub fn remove_redactions(&mut self, vars: impl IntoIterator<Item = &'static str>) -> &mut Self {
+        for var in vars {
+            self.redactions
+                .remove(var)
+                .expect("invalid redactions detected");
+        }
         self
     }
 
@@ -213,20 +280,32 @@ impl Config {
     /// Returns an [`Assert`] object to check the output of running the command
     /// specified by `args` under the default environment.
     #[must_use]
-    pub async fn expect(&self, args: impl AsRef<[&str]>) -> Assert {
+    pub async fn expect<S: AsRef<OsStr> + Clone + Debug>(&self, args: impl AsRef<[S]>) -> Assert {
         self.expect_with_env(args, &[]).await
     }
 
     /// Returns an [`Assert`] object to check the output of running the command
     /// specified by `args` and under the environment specified by `env`.
     #[must_use]
-    pub async fn expect_with_env(
+    pub async fn expect_with_env<S: AsRef<OsStr> + Clone + Debug>(
         &self,
-        args: impl AsRef<[&str]>,
+        args: impl AsRef<[S]>,
         env: impl AsRef<[(&str, &str)]>,
     ) -> Assert {
-        let args = args.as_ref();
-        let output = self.run(args[0], &args[1..], env.as_ref()).await;
+        let (program, args) = args
+            .as_ref()
+            .split_first()
+            .expect("args should not be empty");
+        let output = self
+            .run(
+                program
+                    .as_ref()
+                    .to_str()
+                    .expect("invalid UTF-8 in program name"),
+                args,
+                env.as_ref(),
+            )
+            .await;
         Assert::new(output)
     }
 
@@ -806,6 +885,7 @@ async fn setup_test_state(test_dist_dir: tempfile::TempDir) -> (tempfile::TempDi
     unsafe {
         // Unset env variables that will break our testing
         env::remove_var("CARGO");
+        env::remove_var("RUSTUP_AUTO_INSTALL");
         env::remove_var("RUSTUP_UPDATE_ROOT");
         env::remove_var("RUSTUP_TOOLCHAIN");
         env::remove_var("SHELL");

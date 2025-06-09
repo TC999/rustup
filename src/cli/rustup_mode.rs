@@ -1016,28 +1016,20 @@ async fn show(cfg: &Cfg<'_>, verbose: bool) -> Result<utils::ExitCode> {
         .map(|atar| (&atar.0, &atar.1))
         .unzip();
 
-    let active_toolchain_targets: Vec<TargetTriple> = active_toolchain_name
-        .and_then(|atn| match atn {
-            ToolchainName::Official(desc) => DistributableToolchain::new(cfg, desc.clone())
-                .ok()
-                .and_then(|distributable| distributable.components().ok())
-                .map(|cs_vec| {
-                    cs_vec
-                        .into_iter()
-                        .filter(|c| {
-                            c.installed && c.component.short_name_in_manifest() == "rust-std"
-                        })
-                        .map(|c| c.component.target.expect("rust-std should have a target"))
-                        .collect()
-                }),
-            ToolchainName::Custom(name) => {
-                Toolchain::new(cfg, LocalToolchainName::Named(name.into()))
-                    .ok()?
-                    .installed_targets()
-                    .ok()
-            }
-        })
-        .unwrap_or_default();
+    let active_toolchain_targets = match active_toolchain_name {
+        Some(ToolchainName::Official(desc)) => DistributableToolchain::new(cfg, desc.clone())?
+            .components()?
+            .into_iter()
+            .filter_map(|c| {
+                (c.installed && c.component.short_name_in_manifest() == "rust-std")
+                    .then(|| c.component.target.expect("rust-std should have a target"))
+            })
+            .collect(),
+        Some(ToolchainName::Custom(name)) => {
+            Toolchain::new(cfg, LocalToolchainName::Named(name.into()))?.installed_targets()?
+        }
+        None => Vec::new(),
+    };
 
     // show installed toolchains
     {
@@ -1170,22 +1162,31 @@ async fn target_list(
     installed_only: bool,
     quiet: bool,
 ) -> Result<utils::ExitCode> {
-    // downcasting required because the toolchain files can name any toolchain
-    let distributable = DistributableToolchain::from_partial(toolchain, cfg).await?;
-    common::list_items(
-        distributable,
-        |c| {
-            (c.component.short_name_in_manifest() == "rust-std").then(|| {
-                c.component
-                    .target
-                    .as_deref()
-                    .expect("rust-std should have a target")
-            })
-        },
-        installed_only,
-        quiet,
-        cfg.process,
-    )
+    // If a toolchain is Distributable, we can assume it has a manifest and thus print all possible targets and the installed ones.
+    // However, if it is a custom toolchain, we can only print the installed targets.
+    // NB: this decision is made based on the absence of a manifest in custom toolchains.
+    if let Ok(distributable) = DistributableToolchain::from_partial(toolchain.clone(), cfg).await {
+        common::list_items(
+            distributable.components()?.into_iter().filter_map(|c| {
+                if c.component.short_name_in_manifest() == "rust-std" && c.available {
+                    c.component.target.map(|target| (target, c.installed))
+                } else {
+                    None
+                }
+            }),
+            installed_only,
+            quiet,
+            cfg.process,
+        )
+    } else {
+        let toolchain = cfg.toolchain_from_partial(toolchain).await?;
+        common::list_items(
+            toolchain.installed_targets()?.iter().map(|s| (s, true)),
+            installed_only,
+            quiet,
+            cfg.process,
+        )
+    }
 }
 
 async fn target_add(
@@ -1280,14 +1281,28 @@ async fn component_list(
     quiet: bool,
 ) -> Result<utils::ExitCode> {
     // downcasting required because the toolchain files can name any toolchain
-    let distributable = DistributableToolchain::from_partial(toolchain, cfg).await?;
-    common::list_items(
-        distributable,
-        |c| Some(&c.name),
-        installed_only,
-        quiet,
-        cfg.process,
-    )
+    if let Ok(distributable) = DistributableToolchain::from_partial(toolchain.clone(), cfg).await {
+        common::list_items(
+            distributable
+                .components()?
+                .into_iter()
+                .filter_map(|c| c.available.then_some((c.name, c.installed))),
+            installed_only,
+            quiet,
+            cfg.process,
+        )
+    } else {
+        let toolchain = cfg.toolchain_from_partial(toolchain).await?;
+        common::list_items(
+            toolchain
+                .installed_components()?
+                .iter()
+                .map(|s| (s.name(), true)),
+            installed_only,
+            quiet,
+            cfg.process,
+        )
+    }
 }
 
 async fn component_add(
