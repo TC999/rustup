@@ -422,10 +422,10 @@ impl TargetTriple {
             /// it is only available on Windows 10 1511+, so we use `GetProcAddress`
             /// to maintain backward compatibility with older Windows versions.
             fn arch_primary() -> Option<&'static str> {
-                use windows_sys::Win32::Foundation::{BOOL, HANDLE};
+                use windows_sys::Win32::Foundation::HANDLE;
                 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
                 use windows_sys::Win32::System::Threading::GetCurrentProcess;
-                use windows_sys::core::s;
+                use windows_sys::core::{BOOL, s};
 
                 const IMAGE_FILE_MACHINE_ARM64: u16 = 0xAA64;
                 const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
@@ -497,7 +497,7 @@ impl TargetTriple {
             let mut sys_info;
             let (sysname, machine) = unsafe {
                 sys_info = mem::zeroed();
-                if libc::uname(&mut sys_info) != 0 {
+                if libc::uname(&mut sys_info) == -1 {
                     return None;
                 }
 
@@ -532,7 +532,11 @@ impl TargetTriple {
                 (b"NetBSD", b"x86_64") => Some("x86_64-unknown-netbsd"),
                 (b"NetBSD", b"i686") => Some("i686-unknown-netbsd"),
                 (b"DragonFly", b"x86_64") => Some("x86_64-unknown-dragonfly"),
+                #[cfg(target_os = "illumos")]
                 (b"SunOS", b"i86pc") => Some("x86_64-unknown-illumos"),
+                #[cfg(target_os = "solaris")]
+                (b"SunOS", b"i86pc") => Some("x86_64-pc-solaris"),
+                (b"SunOS", b"sun4v") => Some("sparcv9-sun-solaris"),
                 _ => None,
             };
 
