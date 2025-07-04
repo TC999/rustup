@@ -190,7 +190,7 @@ impl OverrideCfg {
         match self {
             Self::PathBased(path_based_name) => path_based_name.into(),
             Self::Custom(custom_name) => custom_name.into(),
-            Self::Official { ref toolchain, .. } => toolchain.into(),
+            Self::Official { toolchain, .. } => (&toolchain).into(),
         }
     }
 }
@@ -558,12 +558,12 @@ impl<'a> Cfg<'a> {
     fn find_override_config(&self) -> Result<Option<(OverrideCfg, ActiveReason)>> {
         let override_config: Option<(OverrideCfg, ActiveReason)> =
             // First check +toolchain override from the command line
-            if let Some(ref name) = self.toolchain_override {
+            if let Some(name) = &self.toolchain_override {
                 let override_config = name.resolve(&self.get_default_host_triple()?)?.into();
                 Some((override_config, ActiveReason::CommandLine))
             }
             // Then check the RUSTUP_TOOLCHAIN environment variable
-            else if let Some(ref name) = self.env_override {
+            else if let Some(name) = &self.env_override {
                 // Because path based toolchain files exist, this has to support
                 // custom, distributable, and absolute path toolchains otherwise
                 // rustup's export of a RUSTUP_TOOLCHAIN when running a process will
@@ -659,17 +659,15 @@ impl<'a> Cfg<'a> {
                     let default_host_triple = get_default_host_triple(settings, self.process);
                     // Do not permit architecture/os selection in channels as
                     // these are host specific and toolchain files are portable.
-                    if let ResolvableToolchainName::Official(ref name) = toolchain_name {
-                        if name.has_triple() {
-                            // Permit fully qualified names IFF the toolchain is installed. TODO(robertc): consider
-                            // disabling this and backing out https://github.com/rust-lang/rustup/pull/2141 (but provide
-                            // the base name in the error to help users)
-                            let resolved_name = &ToolchainName::try_from(toolchain_name_str)?;
-                            if !self.list_toolchains()?.iter().any(|s| s == resolved_name) {
-                                return Err(anyhow!(format!(
-                                    "target triple in channel name '{name}'"
-                                )));
-                            }
+                    if let ResolvableToolchainName::Official(name) = &toolchain_name
+                        && name.has_triple()
+                    {
+                        // Permit fully qualified names IFF the toolchain is installed. TODO(robertc): consider
+                        // disabling this and backing out https://github.com/rust-lang/rustup/pull/2141 (but provide
+                        // the base name in the error to help users)
+                        let resolved_name = &ToolchainName::try_from(toolchain_name_str)?;
+                        if !self.list_toolchains()?.iter().any(|s| s == resolved_name) {
+                            return Err(anyhow!(format!("target triple in channel name '{name}'")));
                         }
                     }
 
@@ -960,7 +958,7 @@ impl<'a> Cfg<'a> {
             let st = distributable
                 .update_extra(&[], &[], profile, force_update, false)
                 .await;
-            if let Err(ref e) = st {
+            if let Err(e) = &st {
                 (self.notify_handler)(Notification::NonFatalError(e));
             }
             (desc, st)

@@ -1,10 +1,12 @@
-use std::borrow::Cow;
-use std::env::consts::EXE_SUFFIX;
-use std::fmt;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
-use std::str::FromStr;
+use std::{
+    borrow::Cow,
+    env::consts::EXE_SUFFIX,
+    fmt,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    process::ExitStatus,
+    str::FromStr,
+};
 
 use anyhow::{Context, Error, Result, anyhow};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, builder::PossibleValue};
@@ -49,10 +51,10 @@ fn handle_epipe(res: Result<utils::ExitCode>) -> Result<utils::ExitCode> {
     match res {
         Err(e) => {
             let root = e.root_cause();
-            if let Some(io_err) = root.downcast_ref::<std::io::Error>() {
-                if io_err.kind() == std::io::ErrorKind::BrokenPipe {
-                    return Ok(utils::ExitCode(0));
-                }
+            if let Some(io_err) = root.downcast_ref::<io::Error>()
+                && io_err.kind() == io::ErrorKind::BrokenPipe
+            {
+                return Ok(utils::ExitCode(0));
             }
             Err(e)
         }
@@ -774,10 +776,10 @@ async fn default_(
             }
         };
 
-        if let Some((toolchain, reason)) = cfg.active_toolchain()? {
-            if !matches!(reason, ActiveReason::Default) {
-                info!("note that the toolchain '{toolchain}' is currently in use ({reason})");
-            }
+        if let Some((toolchain, reason)) = cfg.active_toolchain()?
+            && !matches!(reason, ActiveReason::Default)
+        {
+            info!("note that the toolchain '{toolchain}' is currently in use ({reason})");
         }
     } else {
         let default_toolchain = cfg
@@ -1102,9 +1104,9 @@ async fn show(cfg: &Cfg<'_>, verbose: bool) -> Result<utils::ExitCode> {
         }
     }
 
-    fn print_header<E>(t: &mut ColorableTerminal, s: &str) -> std::result::Result<(), E>
+    fn print_header<E>(t: &mut ColorableTerminal, s: &str) -> Result<(), E>
     where
-        E: From<std::io::Error>,
+        E: From<io::Error>,
     {
         t.attr(terminalsource::Attr::Bold)?;
         {
@@ -1631,8 +1633,8 @@ async fn doc(
 ) -> Result<utils::ExitCode> {
     let toolchain = cfg.toolchain_from_partial(toolchain).await?;
 
-    if let Ok(distributable) = DistributableToolchain::try_from(&toolchain) {
-        if let [_] = distributable
+    if let Ok(distributable) = DistributableToolchain::try_from(&toolchain)
+        && let [_] = distributable
             .components()?
             .into_iter()
             .filter(|cstatus| {
@@ -1641,19 +1643,18 @@ async fn doc(
             .take(1)
             .collect::<Vec<ComponentStatus>>()
             .as_slice()
-        {
-            info!(
-                "`rust-docs` not installed in toolchain `{}`",
-                distributable.desc()
-            );
-            info!(
-                "To install, try `rustup component add --toolchain {} rust-docs`",
-                distributable.desc()
-            );
-            return Err(anyhow!(
-                "unable to view documentation which is not installed"
-            ));
-        }
+    {
+        info!(
+            "`rust-docs` not installed in toolchain `{}`",
+            distributable.desc()
+        );
+        info!(
+            "To install, try `rustup component add --toolchain {} rust-docs`",
+            distributable.desc()
+        );
+        return Err(anyhow!(
+            "unable to view documentation which is not installed"
+        ));
     };
 
     let (doc_path, fragment) = match (topic, doc_page.name()) {

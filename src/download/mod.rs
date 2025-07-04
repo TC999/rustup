@@ -100,10 +100,10 @@ async fn download_file_(
     // This callback will write the download to disk and optionally
     // hash the contents, then forward the notification up the stack
     let callback: &dyn Fn(Event<'_>) -> anyhow::Result<()> = &|msg| {
-        if let Event::DownloadDataReceived(data) = msg {
-            if let Some(h) = hasher.borrow_mut().as_mut() {
-                h.update(data);
-            }
+        if let Event::DownloadDataReceived(data) = msg
+            && let Some(h) = hasher.borrow_mut().as_mut()
+        {
+            h.update(data);
         }
 
         match msg {
@@ -469,20 +469,23 @@ mod curl {
                 // Listen for headers and parse out a `Content-Length` (case-insensitive) if it
                 // comes so we know how much we're downloading.
                 transfer.header_function(|header| {
-                    if let Ok(data) = str::from_utf8(header) {
-                        let prefix = "content-length: ";
-                        if data.to_ascii_lowercase().starts_with(prefix) {
-                            if let Ok(s) = data[prefix.len()..].trim().parse::<u64>() {
-                                let msg = Event::DownloadContentLengthReceived(s + resume_from);
-                                match callback(msg) {
-                                    Ok(()) => (),
-                                    Err(e) => {
-                                        *cberr.borrow_mut() = Some(e);
-                                        return false;
-                                    }
-                                }
-                            }
-                        }
+                    let Ok(data) = str::from_utf8(header) else {
+                        return true;
+                    };
+                    let prefix = "content-length: ";
+                    let Some((dp, ds)) = data.split_at_checked(prefix.len()) else {
+                        return true;
+                    };
+                    if !dp.eq_ignore_ascii_case(prefix) {
+                        return true;
+                    }
+                    let Ok(s) = ds.trim().parse::<u64>() else {
+                        return true;
+                    };
+                    let msg = Event::DownloadContentLengthReceived(s + resume_from);
+                    if let Err(e) = callback(msg) {
+                        *cberr.borrow_mut() = Some(e);
+                        return false;
                     }
                     true
                 })?;
