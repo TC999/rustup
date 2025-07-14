@@ -25,7 +25,7 @@ use crate::{
         common::{self, PackageUpdate, update_console_filter},
         errors::CLIError,
         help::*,
-        self_update::{self, RustupUpdateAvailable, SelfUpdateMode, check_rustup_update},
+        self_update::{self, SelfUpdateMode, check_rustup_update},
         topical_doc,
     },
     command,
@@ -805,11 +805,15 @@ async fn check_updates(cfg: &Cfg<'_>, opts: CheckOpts) -> Result<utils::ExitCode
     // Ensure that `.buffered()` is never called with 0 as this will cause a hang.
     // See: https://github.com/rust-lang/futures-rs/pull/1194#discussion_r209501774
     if num_channels > 0 {
-        let multi_progress_bars = if is_a_tty {
-            MultiProgress::with_draw_target(ProgressDrawTarget::term_like(Box::new(t)))
-        } else {
-            MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
-        };
+        let multi_progress_bars =
+            MultiProgress::with_draw_target(match cfg.process.var("RUSTUP_TERM_PROGRESS_WHEN") {
+                Ok(s) if s.eq_ignore_ascii_case("always") => {
+                    ProgressDrawTarget::term_like(Box::new(t))
+                }
+                Ok(s) if s.eq_ignore_ascii_case("never") => ProgressDrawTarget::hidden(),
+                _ if is_a_tty => ProgressDrawTarget::term_like(Box::new(t)),
+                _ => ProgressDrawTarget::hidden(),
+            });
         let channels = tokio_stream::iter(channels.into_iter()).map(|(name, distributable)| {
             let pb = multi_progress_bars.add(ProgressBar::new(1));
             pb.set_style(
@@ -869,7 +873,7 @@ async fn check_updates(cfg: &Cfg<'_>, opts: CheckOpts) -> Result<utils::ExitCode
         // If we are running in a TTY, we can use `buffer_unordered` since
         // displaying the output in the correct order is already handled by
         // `indicatif`.
-        let channels = if is_a_tty {
+        let channels = if !multi_progress_bars.is_hidden() {
             channels
                 .buffer_unordered(num_channels)
                 .collect::<Vec<_>>()
@@ -884,26 +888,22 @@ async fn check_updates(cfg: &Cfg<'_>, opts: CheckOpts) -> Result<utils::ExitCode
             if update_a {
                 update_available = true;
             }
-            if !is_a_tty {
+            if multi_progress_bars.is_hidden() {
                 writeln!(t.lock(), "{message}")?;
             }
         }
     }
-    let self_update_mode = cfg.get_self_update_mode()?;
+
+    let self_update_mode = SelfUpdateMode::from_cfg(cfg)?;
     // Priority: no-self-update feature > self_update_mode > no-self-update args.
     // Check for update only if rustup does **not** have the no-self-update feature,
     // and auto-self-update is configured to **enable**
     // and has **no** no-self-update parameter.
-    let self_update = !self_update::NEVER_SELF_UPDATE
+    let self_update = !cfg!(feature = "no-self-update")
         && self_update_mode == SelfUpdateMode::Enable
         && !opts.no_self_update;
 
-    if self_update
-        && matches!(
-            check_rustup_update(cfg.process).await?,
-            RustupUpdateAvailable::True
-        )
-    {
+    if self_update && check_rustup_update(cfg.process).await? {
         update_available = true;
     }
 
@@ -919,12 +919,12 @@ async fn update(
     let mut exit_code = utils::ExitCode(0);
 
     common::warn_if_host_is_emulated(cfg.process);
-    let self_update_mode = cfg.get_self_update_mode()?;
+    let self_update_mode = SelfUpdateMode::from_cfg(cfg)?;
     // Priority: no-self-update feature > self_update_mode > no-self-update args.
     // Update only if rustup does **not** have the no-self-update feature,
     // and auto-self-update is configured to **enable**
     // and has **no** no-self-update parameter.
-    let self_update = !self_update::NEVER_SELF_UPDATE
+    let self_update = !cfg!(feature = "no-self-update")
         && self_update_mode == SelfUpdateMode::Enable
         && !opts.no_self_update;
     let force_non_host = opts.force_non_host;
@@ -988,24 +988,28 @@ async fn update(
             }
         }
         if self_update {
-            exit_code &= common::self_update(|| Ok(()), cfg.process).await?;
+            exit_code &= common::self_update(cfg.process).await?;
         }
     } else if ensure_active_toolchain {
         let (toolchain, reason) = cfg.ensure_active_toolchain(force_non_host, true).await?;
         info!("the active toolchain `{toolchain}` has been installed");
         info!("it's active because: {reason}");
     } else {
-        exit_code &= common::update_all_channels(cfg, self_update, opts.force).await?;
+        exit_code &= common::update_all_channels(cfg, opts.force).await?;
+        if self_update {
+            exit_code &= common::self_update(cfg.process).await?;
+        }
+
         info!("cleaning up downloads & tmp directories");
         utils::delete_dir_contents_following_links(&cfg.download_dir);
         cfg.tmp_cx.clean();
     }
 
-    if !self_update::NEVER_SELF_UPDATE && self_update_mode == SelfUpdateMode::CheckOnly {
+    if !cfg!(feature = "no-self-update") && self_update_mode == SelfUpdateMode::CheckOnly {
         check_rustup_update(cfg.process).await?;
     }
 
-    if self_update::NEVER_SELF_UPDATE {
+    if cfg!(feature = "no-self-update") {
         info!("self-update is disabled for this build of rustup");
         info!("any updates to rustup will need to be fetched with your system package manager")
     }
@@ -1778,7 +1782,7 @@ fn set_auto_self_update(
     cfg: &mut Cfg<'_>,
     auto_self_update_mode: SelfUpdateMode,
 ) -> Result<utils::ExitCode> {
-    if self_update::NEVER_SELF_UPDATE {
+    if cfg!(feature = "no-self-update") {
         let mut args = cfg.process.args_os();
         let arg0 = args.next().map(PathBuf::from);
         let arg0 = arg0

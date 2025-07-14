@@ -246,11 +246,6 @@ impl InstallOpts<'_> {
     }
 }
 
-#[cfg(feature = "no-self-update")]
-pub(crate) const NEVER_SELF_UPDATE: bool = true;
-#[cfg(not(feature = "no-self-update"))]
-pub(crate) const NEVER_SELF_UPDATE: bool = false;
-
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SelfUpdateMode {
@@ -261,6 +256,21 @@ pub enum SelfUpdateMode {
 }
 
 impl SelfUpdateMode {
+    pub(crate) fn from_cfg(cfg: &Cfg<'_>) -> anyhow::Result<Self> {
+        if cfg.process.var("CI").is_ok() && cfg.process.var("RUSTUP_CI").is_err() {
+            // If we're in CI (but not rustup's own CI, which wants to test this stuff!),
+            // disable automatic self updates.
+            return Ok(SelfUpdateMode::Disable);
+        }
+
+        cfg.settings_file.with(|s| {
+            Ok(match s.auto_self_update {
+                Some(mode) => mode,
+                None => SelfUpdateMode::Enable,
+            })
+        })
+    }
+
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Enable => "enable",
@@ -940,7 +950,7 @@ async fn maybe_install_rust(
 }
 
 pub(crate) fn uninstall(no_prompt: bool, process: &Process) -> Result<utils::ExitCode> {
-    if NEVER_SELF_UPDATE {
+    if cfg!(feature = "no-self-update") {
         error!("self-uninstall is disabled for this build of rustup");
         error!("you should probably use your system package manager to uninstall rustup");
         return Ok(utils::ExitCode(1));
@@ -1058,7 +1068,7 @@ pub(crate) async fn update(cfg: &Cfg<'_>) -> Result<utils::ExitCode> {
     common::warn_if_host_is_emulated(cfg.process);
 
     use common::SelfUpdatePermission::*;
-    let update_permitted = if NEVER_SELF_UPDATE {
+    let update_permitted = if cfg!(feature = "no-self-update") {
         HardFail
     } else {
         common::self_update_permitted(true)?
@@ -1250,15 +1260,8 @@ impl fmt::Display for SchemaVersion {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RustupUpdateAvailable {
-    True,
-    False,
-}
-
-pub(crate) async fn check_rustup_update(process: &Process) -> Result<RustupUpdateAvailable> {
-    let mut update_available = RustupUpdateAvailable::False;
-
+/// Returns whether an update was available
+pub(crate) async fn check_rustup_update(process: &Process) -> anyhow::Result<bool> {
     let mut t = process.stdout().terminal(process);
     // Get current rustup version
     let current_version = env!("CARGO_PKG_VERSION");
@@ -1269,21 +1272,19 @@ pub(crate) async fn check_rustup_update(process: &Process) -> Result<RustupUpdat
     let _ = t.attr(terminalsource::Attr::Bold);
     write!(t.lock(), "rustup - ")?;
 
-    if current_version != available_version {
-        update_available = RustupUpdateAvailable::True;
-
+    Ok(if current_version != available_version {
         let _ = t.fg(terminalsource::Color::Yellow);
         write!(t.lock(), "Update available")?;
         let _ = t.reset();
         writeln!(t.lock(), " : {current_version} -> {available_version}")?;
+        true
     } else {
         let _ = t.fg(terminalsource::Color::Green);
         write!(t.lock(), "Up to date")?;
         let _ = t.reset();
         writeln!(t.lock(), " : {current_version}")?;
-    }
-
-    Ok(update_available)
+        false
+    })
 }
 
 #[tracing::instrument(level = "trace")]

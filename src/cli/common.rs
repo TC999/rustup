@@ -280,35 +280,26 @@ fn show_channel_updates(
 
 pub(crate) async fn update_all_channels(
     cfg: &Cfg<'_>,
-    do_self_update: bool,
     force_update: bool,
 ) -> Result<utils::ExitCode> {
     let toolchains = cfg.update_all_channels(force_update).await?;
     let has_update_error = toolchains.iter().any(|(_, r)| r.is_err());
-    let mut exit_code = utils::ExitCode(if has_update_error { 1 } else { 0 });
+    let exit_code = utils::ExitCode(if has_update_error { 1 } else { 0 });
 
     if toolchains.is_empty() {
         info!("no updatable toolchains installed");
     }
 
-    let show_channel_updates = || {
-        if !toolchains.is_empty() {
-            writeln!(cfg.process.stdout().lock())?;
+    if !toolchains.is_empty() {
+        writeln!(cfg.process.stdout().lock())?;
 
-            let t = toolchains
-                .into_iter()
-                .map(|(p, s)| (PackageUpdate::Toolchain(p), s))
-                .collect();
-            show_channel_updates(cfg, t)?;
-        }
-        Ok(())
-    };
-
-    if do_self_update {
-        exit_code &= self_update(show_channel_updates, cfg.process).await?;
-    } else {
-        show_channel_updates()?;
+        let t = toolchains
+            .into_iter()
+            .map(|(p, s)| (PackageUpdate::Toolchain(p), s))
+            .collect();
+        show_channel_updates(cfg, t)?;
     }
+
     Ok(exit_code)
 }
 
@@ -350,10 +341,7 @@ pub(crate) fn self_update_permitted(explicit: bool) -> Result<SelfUpdatePermissi
 }
 
 /// Performs all of a self-update: check policy, download, apply and exit.
-pub(crate) async fn self_update<F>(before_restart: F, process: &Process) -> Result<utils::ExitCode>
-where
-    F: FnOnce() -> Result<()>,
-{
+pub(crate) async fn self_update(process: &Process) -> Result<utils::ExitCode> {
     match self_update_permitted(false)? {
         SelfUpdatePermission::HardFail => {
             error!("Unable to self-update.  STOP");
@@ -365,8 +353,6 @@ where
     }
 
     let setup_path = self_update::prepare_update(process).await?;
-
-    before_restart()?;
 
     if let Some(setup_path) = &setup_path {
         return self_update::run_update(setup_path);
