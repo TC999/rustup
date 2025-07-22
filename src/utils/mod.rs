@@ -7,7 +7,6 @@ use std::io::{self, BufReader, Write};
 use std::ops::{BitAnd, BitAndAssign};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
-use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 use retry::delay::{Fibonacci, jitter};
@@ -26,16 +25,6 @@ pub(crate) mod notifications;
 pub(crate) mod notify;
 pub mod raw;
 pub(crate) mod units;
-
-pub fn io_thread_count() -> usize {
-    // Don't spawn more than this many I/O threads unless the user tells us to.
-    // Feel free to increase this value if it improves performance.
-    const DEFAULT_IO_THREAD_LIMIT: usize = 8;
-
-    thread::available_parallelism()
-        .map_or(1, |p| p.get())
-        .min(DEFAULT_IO_THREAD_LIMIT)
-}
 
 #[must_use]
 #[derive(Debug, PartialEq, Eq)]
@@ -471,13 +460,14 @@ where
             },
         },
     )
-    .with_context(|| {
-        format!(
-            "could not rename {} file from '{}' to '{}'",
+    .map_err(|e| {
+        RustupError::RenamingFile {
             name,
-            src.display(),
-            dest.display()
-        )
+            src: PathBuf::from(src),
+            dest: PathBuf::from(dest),
+            source: e.error,
+        }
+        .into()
     })
 }
 
