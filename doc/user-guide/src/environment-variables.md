@@ -28,7 +28,7 @@
 - `RUSTUP_VERSION` (default: none). Overrides the rustup version (e.g. `1.27.1`)
   to be downloaded when executing `rustup-init.sh` or `rustup self update`.
 
-- `RUSTUP_IO_THREADS` *unstable* (defaults to reported cpu count). Sets the
+- `RUSTUP_IO_THREADS` *unstable* (default: reported cpu count, max 8). Sets the
   number of threads to perform close IO in. Set to `1` to force
   single-threaded IO for troubleshooting, or an arbitrary number to override
   automatic detection.
@@ -41,8 +41,8 @@
   Set to `auto` to use colors only in tty streams, to `always` to always enable colors,
   or to `never` to disable colors.
 
-- `RUSTUP_UNPACK_RAM` *unstable* (default free memory or 500MiB if unable to tell, min 210MiB). Caps the amount of
-  RAM `rustup` will use for IO tasks while unpacking.
+- `RUSTUP_UNPACK_RAM` *unstable* (default: free memory or 500MiB if unable to tell, min 210MiB). Caps the amount of
+  RAM (in bytes) `rustup` will use for IO tasks while unpacking.
 
 - `RUSTUP_NO_BACKTRACE`. Disables backtraces on non-panic errors even when
   `RUST_BACKTRACE` is set.
@@ -61,7 +61,7 @@
   symlink proxies and instead always use hardlinks. If you find this fixes
   a problem, then please report the issue on the [rustup issue tracker].
 
-- `RUSTUP_TERM_PROGRESS_WHEN` (defaults: `auto`). Controls whether progress bars are shown or not.
+- `RUSTUP_TERM_PROGRESS_WHEN` (default: `auto`). Controls whether progress bars are shown or not.
   Set to `always` to always enable progress bars, and to `never` to disable them.
 
 - `RUSTUP_TERM_WIDTH` (default: none). Allows to override the terminal width for progress bars.
